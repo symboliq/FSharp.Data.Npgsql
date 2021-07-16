@@ -67,14 +67,14 @@ module internal Async =
 [<EditorBrowsable(EditorBrowsableState.Never)>]
 type Utils () =
 
-    static let rec LoadDataTable' (triesCurrent, exns, triesMax, retryWaitTime: int, cursor, cmd: NpgsqlCommand, result: DataRow DataTable) =
-        try result.Load cursor
-        with exn when Retry.ShouldRetryException exn ->
-            if Retry.ShouldRetryWithConnection (triesCurrent, triesMax, cmd.Connection) then
-                // NOTE: doing a Thread.Sleep here doesn't help.
-                // I am not convinced this code is meant to be run parallel.
-                LoadDataTable' (triesCurrent + 1, exn :: exns, triesMax, retryWaitTime, cursor, cmd, result)
-            else raise (AggregateException (Seq.rev exns))
+    static let rec LoadDataTableAsync' (triesCurrent, exns, triesMax, retryWaitTime: int, cursor, cmd: NpgsqlCommand, result: DataRow DataTable) =
+        async {
+            try result.Load cursor
+            with exn when Retry.ShouldRetryException exn ->
+                if Retry.ShouldRetryWithConnection (triesCurrent, triesMax, cmd.Connection) then
+                    do! Async.Sleep retryWaitTime
+                    return! LoadDataTableAsync' (triesCurrent+1, exn :: exns, triesMax, retryWaitTime, cursor, cmd, result)
+                else return raise (AggregateException (Seq.rev exns)) }
 
     static let rec SetupConnectionAsync' (triesCurrent, exns, triesMax, retryWaitTime, cmd: NpgsqlCommand, connection) =
         async {
@@ -212,8 +212,9 @@ type Utils () =
                 cache.[resultSet.ExpectedColumns.GetHashCode ()] <- func
                 func
 
-    static member LoadDataTable (tries, retryWaitTime, cursor, cmd, result) =
-        LoadDataTable' (0, [], tries, retryWaitTime, cursor, cmd, result)
+    static member LoadDataTableAsync (tries, retryWaitTime, cursor, cmd, result) =
+        async {
+            do! LoadDataTableAsync' (0, [], tries, retryWaitTime, cursor, cmd, result) }
 
     static member SetupConnectionAsync (tries, retryWaitTime, cmd, connection) =
         async {

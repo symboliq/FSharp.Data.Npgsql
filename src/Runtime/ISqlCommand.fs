@@ -176,31 +176,30 @@ type ISqlCommandImplementation (commandNameHash: int, cfgBuilder: unit -> Design
     static member internal AsyncExecuteReader (cfg, cmd, connection, parameters, executionType) =
         mapTask (ISqlCommandImplementation.AsyncExecuteDataReaderTask (cfg, cmd, connection, parameters), executionType)
 
-    static member internal LoadDataTable cfg (cursor: Common.DbDataReader) (cmd: NpgsqlCommand) (columns: DataColumn[]) =
+    static member internal AsyncLoadDataTable cfg (cursor: Common.DbDataReader) (cmd: NpgsqlCommand) (columns: DataColumn[]) =
+        async {
+            let result = new FSharp.Data.Npgsql.DataTable<DataRow>(selectCommand = cmd)
 
-        let result = new FSharp.Data.Npgsql.DataTable<DataRow>(selectCommand = cmd)
+            for c in columns do
+                CloneDataColumn c |> result.Columns.Add
 
-        for c in columns do
-            CloneDataColumn c |> result.Columns.Add
-
-        Utils.LoadDataTable (cfg.Tries, cfg.RetryWaitTime, cursor, cmd, result)
-        result
+            do! Utils.LoadDataTableAsync (cfg.Tries, cfg.RetryWaitTime, cursor, cmd, result)
+            return result }
 
     static member internal AsyncExecuteDataTables (cfg, cmd, connection, parameters, executionType) =
         let t = Unsafe.uply {
             use! cursor = ISqlCommandImplementation.AsyncExecuteDataReaderTask (cfg, cmd, connection, parameters)
 
-            // No explicit NextResult calls, Load takes care of it
-            let results =
+            let! results =
                 cfg.ResultSets
                 |> Array.map (fun resultSet ->
-                    if Array.isEmpty resultSet.ExpectedColumns then
-                        null
-                    else
+                    if not (Array.isEmpty resultSet.ExpectedColumns) then
                         ISqlCommandImplementation.VerifyOutputColumns(cursor, resultSet.ExpectedColumns)
-                        ISqlCommandImplementation.LoadDataTable cfg cursor (cmd.Clone()) resultSet.ExpectedColumns |> box)
+                        ISqlCommandImplementation.AsyncLoadDataTable cfg cursor (cmd.Clone()) resultSet.ExpectedColumns
+                    else async { return Unchecked.defaultof<_> }) // where is Async.Return?
+                |> fun asyncs -> Async.Parallel (asyncs, 1) // one at a time until we can see if more is safe
 
-            ISqlCommandImplementation.SetNumberOfAffectedRows (results, cmd.Statements)
+            ISqlCommandImplementation.SetNumberOfAffectedRows (Array.map box results, cmd.Statements)
             return results }
 
         mapTask (t, executionType)
@@ -208,7 +207,7 @@ type ISqlCommandImplementation (commandNameHash: int, cfgBuilder: unit -> Design
     static member internal AsyncExecuteDataTable (cfg, cmd, connection, parameters, executionType) =
         let t = Unsafe.uply {
             use! reader = ISqlCommandImplementation.AsyncExecuteDataReaderTask (cfg, cmd, connection, parameters) 
-            return ISqlCommandImplementation.LoadDataTable cfg reader (cmd.Clone()) cfg.ResultSets.[0].ExpectedColumns }
+            return! ISqlCommandImplementation.AsyncLoadDataTable cfg reader (cmd.Clone()) cfg.ResultSets.[0].ExpectedColumns }
 
         mapTask (t, executionType)
 
